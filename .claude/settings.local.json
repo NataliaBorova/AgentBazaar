@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command ' *)",
+      "Bash(grep -r \"///\" --include=\"*.rs\")",
+      "Bash(cargo check *)",
+      "Bash(node -e ' *)",
+      "Bash(node --input-type=module --check)",
+      "Bash(npm run *)"
+    ]
+  }
+}

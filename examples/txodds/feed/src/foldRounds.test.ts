@@ -1,0 +1,89 @@
+import { describe, it, expect } from 'vitest'
+import { foldRounds, type RawMessage } from './foldRounds.js'
+
+const sellers = ['seller-cheap', 'seller-premium', 'seller-lazy']
+
+// A full happy-path round, verbatim from a real devnet run (sigs truncated).
+const round1: RawMessage[] = [
+  { sender: 'buyer-agent', text: 'WANT round=1 service=coingecko arg=SOL-USDC budget=0.001' },
+  { sender: 'seller-premium', text: 'BID round=1 price=0.0005 by=seller-premium note=available' },
+  { sender: 'seller-cheap', text: 'BID round=1 price=0.0002 by=seller-cheap note=available' },
+  { sender: 'buyer-agent', text: 'AWARD round=1 to=seller-premium reason="verified data worth the premium"' },
+  { sender: 'seller-premium', text: 'PAYMENT_REQUIRED round=1 rail=x402 amount=0.0005 currency=SOL reference=DKQy seller=7jwB' },
+  { sender: 'buyer-agent', text: 'PAYMENT_PROOF round=1 rail=x402 reference=DKQy proof=SIGNEDtxBase64 buyer=47Dp' },
+  { sender: 'seller-premium', text: 'PAYMENT_CONFIRMED round=1 rail=x402 reference=DKQy paid=true amount=0.0005 currency=SOL sig=5syz' },
+  { sender: 'seller-premium', text: 'DELIVERED round=1 {"coin":"solana","usd":72.33}' },
+  { sender: 'buyer-agent', text: 'SETTLED round=1 rail=x402 reference=DKQy amount=0.0005 sig=5syz' },
+]
+
+describe('foldRounds', () => {
+  it('folds a full round to settled with parsed fields', () => {
+    const [r] = foldRounds(round1, sellers)
+    expect(r.round).toBe(1)
+    expect(r.want).toEqual({ service: 'coingecko', arg: 'SOL-USDC', budgetSol: 0.001 })
+    expect(r.bids).toHaveLength(2)
+    expect(r.award).toEqual({ to: 'seller-premium', reason: 'verified data worth the premium' })
+    expect(r.payment).toEqual({ reference: 'DKQy', seller: '7jwB', amountSol: 0.0005, buyer: '47Dp' })
+    expect(r.paid?.sig).toBe('5syz')
+    expect(r.delivered?.data).toEqual({ coin: 'solana', usd: 72.33 })
+    expect(r.settled?.sig).toBe('5syz')
+    expect(r.status).toBe('settled')
+  })
+
+  it('marks the non-bidding seller as declined (self-selection)', () => {
+    const [r] = foldRounds(round1, sellers)
+    expect(r.declined).toEqual(['seller-lazy']) // only cheap + premium bid on coingecko
+  })
+
+  it('dedupes a seller that bids twice (last write kept by first-wins guard)', () => {
+    const msgs: RawMessage[] = [
+      { sender: 'buyer-agent', text: 'WANT round=2 service=coingecko arg=x budget=0.001' },
+      { sender: 'seller-cheap', text: 'BID round=2 price=0.0002 by=seller-cheap' },
+      { sender: 'seller-cheap', text: 'BID round=2 price=0.0003 by=seller-cheap' },
+    ]
+    expect(foldRounds(msgs).find((r) => r.round === 2)?.bids).toHaveLength(1)
+  })
+
+  it('separates interleaved rounds and sorts ascending', () => {
+    const msgs: RawMessage[] = [
+      { sender: 'b', text: 'WANT round=2 service=s arg=a budget=0.001' },
+      { sender: 'b', text: 'WANT round=1 service=s arg=a budget=0.001' },
+      { sender: 'c', text: 'BID round=1 price=0.0002 by=c' },
+      { sender: 'c', text: 'BID round=2 price=0.0003 by=c' },
+    ]
+    const rounds = foldRounds(msgs)
+    expect(rounds.map((r) => r.round)).toEqual([1, 2])
+  })
+
+  it('folds payment rail messages into first-class proof receipts', () => {
+    const [r] = foldRounds([
+      { sender: 'buyer-agent', text: 'WANT round=8 service=txline arg=edge-9001 budget=0.001' },
+      { sender: 'seller-premium', text: 'PAYMENT_REQUIRED round=8 rail=pay-sh amount=0.03 currency=USDC reference=pay-8 seller=pay.sh/txodds-context url=https://pay.sh/api/quicknode' },
+      { sender: 'seller-premium', text: 'PAYMENT_PROOF round=8 rail=pay-sh reference=pay-8 proof=pay-sh-demo:abc buyer=seller-premium' },
+      {
+        sender: 'seller-premium',
+        text: 'PAYMENT_CONFIRMED round=8 rail=pay-sh reference=pay-8 paid=true amount=0.03 currency=USDC',
+        timestamp: '2026-07-06T00:00:00.000Z',
+      },
+    ], sellers)
+
+    expect(r.proofReceipts).toEqual([{
+      rail: 'pay-sh',
+      provider: 'pay.sh/txodds-context',
+      service: 'txline-upstream',
+      reference: 'pay-8',
+      proof: 'pay-sh-demo:abc',
+      amount: '0.03',
+      currency: 'USDC',
+      paid: true,
+      simulated: true,
+      issuedAt: '2026-07-06T00:00:00.000Z',
+    }])
+  })
+
+  it('leaves an in-progress round in a non-settled status', () => {
+    const r = foldRounds(round1.slice(0, 3), sellers)[0]
+    expect(r.status).toBe('bidding')
+    expect(r.declined).toEqual([]) // bidding still open → not yet declined
+  })
+})

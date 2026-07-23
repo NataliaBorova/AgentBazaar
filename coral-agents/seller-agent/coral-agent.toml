@@ -1,0 +1,41 @@
+# Agent manifest — coral-server reads this to discover, launch, and configure the agent.
+# Docs: https://docs.coralos.ai/reference/agent · [options] table
+# https://docs.coralos.ai/reference/agent/tables/options · docker runtime
+# https://docs.coralos.ai/reference/agent/tables/runtimes/docker · whole-kit walkthrough /CORAL.md
+edition = 4
+
+[agent]
+name = "seller-agent"
+version = "0.1.0"
+description = "TxODDS marketplace seller. Bids on txline WANTs, verifies an x402 payment, and delivers a fair-line read. SERVICES=txline,sharp-movement also lets it analyze fixtures the research watcher flags as having moved."
+summary = "TypeScript TxODDS seller that competes in CoralOS and settles directly over x402."
+readme = "Bids in the shared market thread (WANT -> BID), issues PAYMENT_REQUIRED on AWARD, submits + verifies the buyer's signed x402 payment on PAYMENT_PROOF, then delivers the TxODDS read."
+
+[agent.license]
+type = "spdx"
+expression = "MIT"
+
+[options]
+SELLER_WALLET = { type = "string", description = "Devnet wallet pubkey that receives payments" }
+AGENT_NAME = { type = "string", default = "seller-agent", description = "Market identity for this seller persona" }
+SERVICES = { type = "string", default = "txline", description = "Inventory - default demo uses txline; set to txline,sharp-movement (with SHARP_MOVEMENT_ENABLED=1 on the round launcher) to also analyze research-watcher-flagged moves" }
+FLOOR_SOL = { type = "f64", default = 0.0005, description = "Minimum bid in SOL" }
+PERSONA = { type = "string", default = "a TxODDS specialist selling verified fair-line reads", description = "Bidding persona" }
+STRATEGY = { type = "string", default = "", description = "Pricing posture once REPUTATION_URL clearing data is available: undercut | premium | balanced (default)" }
+REPUTATION_URL = { type = "string", default = "", description = "The feed's /api/reputation - when set, prices against the service's real recent clearing data instead of always bidding at the floor" }
+SERVICE = { type = "string", default = "txline", description = "Delivery service; only txline is routed" }
+SOLANA_RPC_URL = { type = "string", default = "", description = "Solana RPC URL" }
+PROCURE_RAIL = { type = "string", default = "", description = "Set to x402 to buy an upstream resource for real before delivering (see README's Optional Upstream Procurement)" }
+SELLER_KEYPAIR_B58 = { type = "string", default = "", description = "The seller's own spend key for the x402 procurement leg - distinct from SELLER_WALLET, which only receives" }
+PROCURE_X402_URL = { type = "string", default = "", description = "The x402-protected resource to buy when PROCURE_RAIL=x402" }
+TXLINE_API_KEY = { type = "string", default = "", description = "Activated TxLINE API token" }
+TXLINE_BASE_URL = { type = "string", default = "", description = "Override the TxLINE host" }
+TRACE = { type = "string", default = "", description = "Set to 1 to log settlement checks" }
+HARNESS = { type = "string", default = "in-process", description = "Harness adapter doing the work: in-process | claude-code | cli (see packages/harness-runtime)" }
+HARNESS_CMD = { type = "string", default = "", description = "HARNESS=cli only: the harness argv (JSON array or space-split; {prompt} substitutes the order)" }
+HARNESS_NAME = { type = "string", default = "", description = "HARNESS=cli only: label for the harness in logs/ledger" }
+HARNESS_TIMEOUT_MS = { type = "f64", default = 300000, description = "Kill an external harness order after this long" }
+CLAUDE_CODE_MAX_TURNS = { type = "string", default = "6", description = "HARNESS=claude-code: agentic turn budget per order" }
+
+[runtimes.docker]
+image = "seller-agent:0.1.0"

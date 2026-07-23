@@ -1,0 +1,127 @@
+import { describe, it, expect, beforeEach } from 'vitest'
+import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { writeRun, readRun, listRuns, listSessionRuns, runDir } from './store.js'
+import { runId, sha256Hex, explorerTx, type RunRecord, type TranscriptEntry } from './run.js'
+
+const session = 'a1b2c3d4-session'
+
+const settledRun = (): RunRecord => ({
+  runId: runId(session, 1),
+  session,
+  round: 1,
+  status: 'settled',
+  want: { service: 'coingecko', arg: 'SOL-USDC', budgetSol: 0.001 },
+  bids: [
+    { by: 'seller-cheap', priceSol: 0.0002, note: 'available' },
+    { by: 'seller-premium', priceSol: 0.0005 },
+  ],
+  declined: ['seller-lazy'],
+  award: { to: 'seller-premium', reason: 'verified data worth the premium' },
+  payment: {
+    reference: 'DKQy',
+    seller: '7jwB',
+    amountSol: 0.0005,
+    confirmed: { sig: '5syz', buyer: '47Dp' },
+  },
+  delivery: {
+    raw: '{"coin":"solana","usd":72.33}',
+    data: { coin: 'solana', usd: 72.33 },
+    sha256: sha256Hex('{"coin":"solana","usd":72.33}'),
+  },
+  txs: [
+    { kind: 'payment', sig: '5syz', explorer: explorerTx('5syz') },
+  ],
+  updatedAt: '2026-07-04T00:00:00.000Z',
+})
+
+const transcript: TranscriptEntry[] = [
+  { sender: 'buyer-agent', text: 'WANT round=1 service=coingecko arg=SOL-USDC budget=0.001' },
+  { sender: 'seller-premium', text: 'DELIVERED round=1 {"coin":"solana","usd":72.33}' },
+]
+
+describe('ledger store', () => {
+  let base: string
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), 'ledger-'))
+  })
+
+  it('round-trips a settled run with its transcript', () => {
+    writeRun(base, settledRun(), transcript)
+    const loaded = readRun(base, session, 1)
+    expect(loaded?.run).toEqual(settledRun())
+    expect(loaded?.transcript).toEqual(transcript)
+  })
+
+  it('writes one facet file per present facet, none for absent ones', () => {
+    writeRun(base, settledRun(), transcript)
+    const dir = runDir(base, session, 1)
+    for (const f of ['run.json', 'want.json', 'bids.json', 'award.json', 'payment.json', 'delivery.json', 'proof.json', 'txs.json', 'transcript.jsonl'])
+      expect(existsSync(join(dir, f)), f).toBe(true)
+    expect(existsSync(join(dir, 'verification.json'))).toBe(false) // no verifier yet
+    expect(existsSync(join(dir, 'proof_receipts.json'))).toBe(false) // no upstream payment leg
+  })
+
+  it('persists proof receipts as a first-class facet', () => {
+    const receipt = {
+      rail: 'pay-sh', provider: 'pay.sh/txodds-context', service: 'txline-edge-upstream',
+      reference: 'order-1', proof: 'pay-sh-demo:abc', amount: '0.03', currency: 'USDC',
+      paid: true, simulated: true, issuedAt: '2026-07-06T00:00:00.000Z',
+    }
+    writeRun(base, { ...settledRun(), proofReceipts: [receipt] }, transcript)
+    const dir = runDir(base, session, 1)
+    expect(JSON.parse(readFileSync(join(dir, 'proof_receipts.json'), 'utf8'))).toEqual([receipt])
+    expect(readRun(base, session, 1)?.run.proofReceipts).toEqual([receipt])
+  })
+
+  it('persists a compact proof artifact for e2e success checks', () => {
+    writeRun(base, { ...settledRun(), verification: { verdict: 'pass', by: 'verifier-agent' } }, transcript)
+    const proof = JSON.parse(readFileSync(join(runDir(base, session, 1), 'proof.json'), 'utf8'))
+    expect(proof).toMatchObject({
+      roundId: 'a1b2c3d4-session/round-1',
+      want: 'coingecko SOL-USDC budget=0.001',
+      bid: 'seller-premium price=0.0005',
+      award: 'seller-premium',
+      payment: 'DKQy seller=7jwB amount=0.0005',
+      paymentSignature: '5syz',
+      deliveryHash: sha256Hex('{"coin":"solana","usd":72.33}'),
+      verified: true,
+      finalState: 'SETTLED',
+    })
+  })
+
+  it('binds the delivery content hash into delivery.json', () => {
+    writeRun(base, settledRun(), transcript)
+    const delivery = JSON.parse(readFileSync(join(runDir(base, session, 1), 'delivery.json'), 'utf8'))
+    expect(delivery.sha256).toBe(sha256Hex(delivery.raw))
+  })
+
+  it('re-persisting a round overwrites with the furthest state', () => {
+    const early: RunRecord = { ...settledRun(), status: 'bidding', award: undefined, payment: undefined, delivery: undefined, txs: [] }
+    writeRun(base, early, [transcript[0]])
+    writeRun(base, settledRun(), transcript)
+    expect(readRun(base, session, 1)?.run.status).toBe('settled')
+    expect(readRun(base, session, 1)?.transcript).toHaveLength(2)
+  })
+
+  it('lists runs per session ascending, and across sessions', () => {
+    writeRun(base, settledRun(), transcript)
+    writeRun(base, { ...settledRun(), runId: runId(session, 2), round: 2, status: 'bidding' }, [])
+    writeRun(base, { ...settledRun(), runId: runId('other', 1), session: 'other' }, [])
+    expect(listSessionRuns(base, session).map((r) => r.round)).toEqual([1, 2])
+    expect(listRuns(base)).toHaveLength(3)
+    expect(listSessionRuns(base, 'never-ran')).toEqual([])
+  })
+
+  it('readRun returns null for a round never persisted', () => {
+    expect(readRun(base, session, 99)).toBeNull()
+  })
+
+  it('sanitizes hostile session ids used as path segments', () => {
+    const hostile = '../../etc/passwd'
+    const dir = writeRun(base, { ...settledRun(), session: hostile, runId: runId(hostile, 1) }, [])
+    expect(dir.startsWith(base)).toBe(true)
+    expect(readRun(base, hostile, 1)?.run.session).toBe(hostile)
+  })
+})

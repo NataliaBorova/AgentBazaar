@@ -1,0 +1,70 @@
+# TxLINE World Cup API Notes
+
+This file documents the TxLINE API surface used by `examples/txodds`. The implementation intentionally derives local features from TxLINE fixture, odds, and score snapshots rather than adding unrelated data providers.
+
+**This is a time-boxed free tier, not a permanent API.** The guest/free-tier TxLINE access this example subscribes to is provided for the World Cup 2026 tournament period. It is not guaranteed to work before or after that window. Do not build a fork that assumes indefinite free access — plan for either commercial TxODDS credentials or an alternate data source once the tournament period ends.
+
+## Access Model
+
+| Item | Detail |
+|---|---|
+| Host | `https://txline-dev.txodds.com` |
+| Guest auth | `POST /auth/guest/start` |
+| API token | Activated `X-Api-Token` from the Solana subscription flow. |
+| Token storage | Server-side only, in the proxy process. |
+| Client | `agent/txline.ts` |
+| Proxy | `server/proxy.ts` |
+
+The browser does not store the guest JWT or `X-Api-Token`.
+
+## Snapshot Endpoints
+
+| Capability | Endpoint | Returned data | Current use |
+|---|---|---|---|
+| Fixtures | `GET /api/fixtures/snapshot` | Fixture id, competition, participants, home/away flag, start time. | Called internally by the proxy's `/api/board` and `/api/edge-x402`; not exposed as its own proxy route. |
+| Odds | `GET /api/odds/snapshot/{fixtureId}` | Markets, bookmaker, `SuperOddsType`, price names, de-margined `Pct`. | Called internally by the proxy's `/api/board` and `/api/edge-x402`; not exposed as its own proxy route. |
+| Scores | `GET /api/scores/snapshot/{fixtureId}` | Score events. | Called by `research/grade.ts` after a round settles, to check a sharp-movement delivery's prediction against the real final result (see `research/GRADING.md`). |
+
+Properties:
+
+- the API is snapshot-based, so movement detection is implemented by polling and diffing;
+- `Pct` is already de-margined;
+- free-tier data covers World Cup and International Friendlies.
+
+## Implemented Derivations
+
+| Derivation | Source | Implementation |
+|---|---|---|
+| Board | Fixtures plus odds snapshots. | `server/proxy.ts` exposes `/api/board`. |
+| Edge analysis | One fixture's verified odds snapshot. | `agent/edge.ts`, exposed via `/api/edge-x402`. |
+| Settlement reference | Order/delivery data. | CoralOS buyer-agent/seller-agent x402 settlement (`coral-agents/`), not the proxy. |
+
+## Candidate Technical Extensions
+
+These extensions remain inside the TxLINE API surface:
+
+| Extension | API dependency | Implementation notes |
+|---|---|---|
+| Additional markets | Existing odds snapshot. | Render more `SuperOddsType` values instead of only 1X2. |
+| Competition filter | Existing fixtures snapshot. | Group by `Competition` or `CompetitionId`; International Friendlies uses competition id `430`. |
+| Line movement history | Repeated odds snapshots. | Store a bounded in-memory ring per fixture/outcome. |
+| Score display | Existing scores snapshot. | Gate UI display on non-empty score data. |
+| Research triggers | Repeated board snapshots. | Use `MOVE_PCT` threshold and verified-odds availability. |
+
+## Constraints
+
+- Do not present fallback data as live TxLINE data.
+- Do not add unverified odds from unrelated providers to the TxLINE example.
+- Keep TxLINE credentials server-side.
+- Keep settlement on devnet unless the repository policy changes through a separate review.
+- Treat API responses as untrusted input and validate before using them in paid delivery.
+- Free-tier guest access is scoped to the World Cup 2026 period; do not assume it remains available afterward (see the disclaimer in `README.md`).
+
+## Related Files
+
+| File | Role |
+|---|---|
+| `agent/txline.ts` | TxLINE API client. |
+| `agent/edge.ts` | Fair-line transform and deterministic plain-language analysis. |
+| `agent/service.ts` | Paid service wrapper. |
+| `server/proxy.ts` | Local proxy: board data, x402 edge reference merchant, CoralOS round launch/forwarding. |
